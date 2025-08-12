@@ -1,0 +1,9 @@
+Timestamp,Participant,Transcript
+2025-08-12 10:00:00.006,[internal],Good morning.
+2025-08-12 10:00:01.132,[internal],Can I have your name?
+2025-08-12 10:00:02.258,[external],Sure that is John Doe.
+2025-08-12 10:00:03.384,[internal],Thank you.
+2025-08-12 10:00:04.510,[external],You're welcome.
+2025-08-12 10:00:05.636,[internal],Can I have your email address?
+2025-08-12 10:00:06.762,[external],john.doe@example.com
+2025-08-12 10:00:07.888,[internal],Thank you.

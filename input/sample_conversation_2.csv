@@ -1,0 +1,9 @@
+Timestamp,Participant,Transcript
+2025-08-12 10:00:00.006,[internal],Good afternoon!
+2025-08-12 10:00:01.132,[internal],Can I have your name please?
+2025-08-12 10:00:02.258,[external],Yeah it's Mary.
+2025-08-12 10:00:03.384,[internal],Thanks Mary.
+2025-08-12 10:00:05.636,[internal],Can I have your email address that you used for your order please?
+2025-08-12 10:00:06.762,[external],yeah its mary.jane@anotherexample.co.uk.
+2025-08-12 10:00:07.888,[internal],Thanks, and finally your phone number?
+2025-08-12 10:00:08.888,[external],It's 07869588888.
