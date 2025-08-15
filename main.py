@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -22,15 +23,15 @@ def load_conversation_from_csv(filename: str) -> dict:
     """Load conversation from a CSV file.
     
     Expected format:
-        Timestamp,Participant,Transcript
-        2025-07-27 10:00:00.006,[internal],Good morning.
-        2025-07-27 10:00:01.132,[internal],Can I have your name?
-        2025-07-27 10:00:02.258,[external],Sure that is John Doe.
-        2025-07-27 10:00:03.384,[internal],Thank you.
-        2025-07-27 10:00:04.510,[external],You're welcome.
-        2025-07-27 10:00:05.636,[internal],Can I have your email address?
-        2025-07-27 10:00:06.762,[external],john.doe@example.com
-        2025-07-27 10:00:07.888,[internal],Thank you.
+    Timestamp | Participant | Transcript
+    2025-07-27 10:00:00.006 | [internal] | Good morning.
+    2025-07-27 10:00:01.132 | [internal] | Can I have your name?
+    2025-07-27 10:00:02.258 | [external] | Sure that is John Doe.
+    2025-07-27 10:00:03.384 | [internal] | Thank you.
+    2025-07-27 10:00:04.510 | [external] | You're welcome.
+    2025-07-27 10:00:05.636 | [internal] | Can I have your email address?
+    2025-07-27 10:00:06.762 | [external] | john.doe@example.com
+    2025-07-27 10:00:07.888 | [internal] | Thank you.
     """
     with open(filename, 'r') as file:
         csv_content = file.read()
@@ -42,8 +43,22 @@ def load_conversation_from_csv(filename: str) -> dict:
         "conversationItems": [],
     }
 
-    for line in csv_content.strip().split("\n")[1:]:
-        timestamp, participant, text = line.split(",", 2)
+    for raw_line in csv_content.strip().split("\n")[1:]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Split on pipe with optional surrounding spaces; keep transcript intact
+        parts = re.split(r"\s*\|\s*", line, maxsplit=2)
+        if len(parts) < 3:
+            # Fallback: try comma-delimited (legacy) before skipping
+            try:
+                parts = line.split(",", 2)
+            except Exception:
+                parts = []
+        if len(parts) < 3:
+            print(f"Skipping malformed line (expected 3 fields): {raw_line}")
+            continue
+        timestamp, participant, text = parts[0].strip(), parts[1].strip(), parts[2]
         conversation["conversationItems"].append({
             "participantId": participant,
             "id": f"conversationId_{len(conversation['conversationItems']) + 1}",
@@ -177,5 +192,4 @@ def main():
     print(f"Done. {successes} succeeded, {failures} failed.")
 
 if __name__ == "__main__":
-    main()
     main()
