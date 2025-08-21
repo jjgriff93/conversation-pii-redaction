@@ -4,4 +4,7 @@ version = "0.1.0"
 description = "Simple script to redact PII from conversation transcripts"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pip-system-certs>=5.2",
+    "requests>=2.32.4",
+]

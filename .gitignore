@@ -1,4 +1,8 @@
+/input/*
 /output
+
+# Keep a single tracked example in input/
+!/input/sample_conversation.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
