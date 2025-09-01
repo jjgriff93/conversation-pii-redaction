@@ -104,6 +104,7 @@ You can also provide conversations in JSON format. Configure where the conversat
 - JSON_PARTICIPANT_FIELD: field name for the participant inside each item (default: `participant`).
 - JSON_TEXT_FIELD: field name for the text inside each item (default: `text`).
 - JSON_TIMESTAMP_FIELD: optional field name for a timestamp inside each item (optional; if not provided, output timestamps will be `null`).
+- JSON_MULTI_DOC: when `true`, and the top-level JSON is an array, treat each element as a separate document (conversation). Outputs will be suffixed with `_001`, `_002`, etc.
 
 Example for a file like `dummy.json` that contains an array of phrases with shape `{ participantPurpose: string, text: string }`:
 
@@ -126,6 +127,22 @@ uv run main.py
 ```
 
 Place `dummy.json` in the `input/` folder. The tool will produce `output/dummy.json` with redacted content.
+
+#### Multi-document JSON example
+
+If your input JSON is a top-level array where each element is a separate document containing `phrases`, enable multi-document mode:
+
+- macOS/Linux
+
+```bash
+export JSON_MULTI_DOC=true
+export JSON_CONVERSATION_PATH=phrases
+export JSON_PARTICIPANT_FIELD=participantPurpose
+export JSON_TEXT_FIELD=text
+uv run main.py
+```
+
+Given an input file `input/sessions.json` like `[{"phrases":[...]},{"phrases":[...]}]`, this will emit `output/sessions_001.json`, `output/sessions_002.json`, etc.
 
 ### Retry and resilience
 

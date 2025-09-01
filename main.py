@@ -26,6 +26,7 @@ JSON_PARTICIPANT_FIELD = os.getenv("JSON_PARTICIPANT_FIELD", "participant")
 JSON_TEXT_FIELD = os.getenv("JSON_TEXT_FIELD", "text")
 # Optional timestamp field inside each conversation item
 JSON_TIMESTAMP_FIELD = os.getenv("JSON_TIMESTAMP_FIELD")
+JSON_MULTI_DOC = os.getenv("JSON_MULTI_DOC", "false").strip().lower() in {"1", "true", "yes"}
 
 # Retry configuration (tunable via environment variables)
 MAX_HTTP_RETRIES = int(os.getenv("MAX_HTTP_RETRIES", "5"))
@@ -109,7 +110,7 @@ def load_conversation_from_csv(filename: str) -> tuple[dict, dict[str, str | Non
 
     return conversation, timestamps_by_id
 
-def _get_by_path(obj: dict, path: str | None):
+def _get_by_path(obj: dict | list, path: str | None):
     """Safely navigate a dot-delimited path in a dictionary. If path is None, return obj.
     Supports integer indexes for list navigation when a path segment is a digit.
     """
@@ -138,49 +139,32 @@ def _get_by_path(obj: dict, path: str | None):
             return None
     return cur
 
-def load_conversation_from_json(filename: str) -> tuple[dict, dict[str, str | None]]:
-    """Load conversation from a JSON file and return
-    (conversation_payload, timestamps_by_id).
-
-    The JSON structure is configurable via environment variables:
-        - JSON_CONVERSATION_PATH: dot path to the array of items (e.g. "phrases"). If not set,
-          this function will attempt to detect an array at the root or common keys (phrases, messages, conversation).
-        - JSON_PARTICIPANT_FIELD: field name in each item for the participant (default: "participant").
-        - JSON_TEXT_FIELD: field name in each item for the text (default: "text").
-        - JSON_TIMESTAMP_FIELD: optional field name in each item for the timestamp.
-    """
-    with open(filename, 'r', encoding='utf-8-sig') as f:
-        data = json.load(f)
-
+def _build_conversation_from_doc(doc: dict | list, conv_id: str) -> tuple[dict, dict[str, str | None]]:
+    """Build a conversation payload from a single JSON document (dict or list)."""
     # Find the array that holds the conversation items
     items = None
-    if isinstance(data, list):
-        items = data
+    if isinstance(doc, list):
+        items = doc
     else:
-        # Try configured path first
-        items = _get_by_path(data, JSON_CONVERSATION_PATH)
-        if items is None:
-            # Heuristics: try common keys
+        items = _get_by_path(doc, JSON_CONVERSATION_PATH)
+        if items is None and isinstance(doc, dict):
             for key in ("phrases", "messages", "conversation", "items"):
-                v = data.get(key) if isinstance(data, dict) else None
+                v = doc.get(key)
                 if isinstance(v, list):
                     items = v
                     break
 
     if not isinstance(items, list):
-        raise ValueError(
-            "Could not locate conversation array in JSON. Set JSON_CONVERSATION_PATH (e.g. 'phrases')."
-        )
+        raise ValueError("Could not locate conversation array in JSON document. Set JSON_CONVERSATION_PATH (e.g. 'phrases').")
 
     conversation: dict = {
-        "id": os.path.splitext(os.path.basename(filename))[0],
+        "id": conv_id,
         "language": "en",
         "modality": "text",
         "conversationItems": [],
     }
 
     timestamps_by_id: dict[str, str | None] = {}
-
     idx = 0
     for item in items:
         if not isinstance(item, dict):
@@ -208,6 +192,34 @@ def load_conversation_from_json(filename: str) -> tuple[dict, dict[str, str | No
         timestamps_by_id[item_id] = timestamp_val
 
     return conversation, timestamps_by_id
+
+def load_conversations_from_json(filename: str) -> list[tuple[dict, dict[str, str | None]]]:
+    """Load one or more conversations from a JSON file.
+
+    Behavior:
+      - If JSON_MULTI_DOC=true and the top-level JSON is an array, treat each element as a document
+        and generate a separate conversation with IDs suffixed _001, _002, ...
+      - Otherwise, treat the file as a single document containing the conversation array.
+    """
+    with open(filename, 'r', encoding='utf-8-sig') as f:
+        data = json.load(f)
+
+    base_id = os.path.splitext(os.path.basename(filename))[0]
+
+    conversations: list[tuple[dict, dict[str, str | None]]] = []
+    if JSON_MULTI_DOC and isinstance(data, list):
+        for i, doc in enumerate(data, start=1):
+            if not isinstance(doc, (dict, list)):
+                continue
+            conv_id = f"{base_id}_{i:03d}"
+            conversation, timestamps_by_id = _build_conversation_from_doc(doc, conv_id)
+            conversations.append((conversation, timestamps_by_id))
+    else:
+        # Single document mode
+        conversation, timestamps_by_id = _build_conversation_from_doc(data, base_id)
+        conversations.append((conversation, timestamps_by_id))
+
+    return conversations
 
 def redact_conversation(conversation: dict, timestamps_by_id: dict[str, str | None]) -> dict:
     analyze_endpoint = f"{endpoint}language/analyze-conversations/jobs?api-version={api_version}"
@@ -404,19 +416,26 @@ def main():
         last_exc: Exception | None = None
         for attempt in range(1, MAX_FILE_RETRIES + 1):
             try:
+                out_paths: list[str] = []
                 if filename.lower().endswith('.csv'):
                     conversation, timestamps_by_id = load_conversation_from_csv(filepath)
+                    redacted_conversation = redact_conversation(conversation, timestamps_by_id)
+                    out_path = os.path.join(output_dir, f"{redacted_conversation['id']}.json")
+                    with open(out_path, "w", encoding="utf-8") as outfile:
+                        json.dump(redacted_conversation, outfile, indent=4)
+                    out_paths.append(out_path)
                 elif filename.lower().endswith('.json'):
-                    conversation, timestamps_by_id = load_conversation_from_json(filepath)
+                    convo_list = load_conversations_from_json(filepath)
+                    for conversation, timestamps_by_id in convo_list:
+                        redacted_conversation = redact_conversation(conversation, timestamps_by_id)
+                        out_path = os.path.join(output_dir, f"{redacted_conversation['id']}.json")
+                        with open(out_path, "w", encoding="utf-8") as outfile:
+                            json.dump(redacted_conversation, outfile, indent=4)
+                        out_paths.append(out_path)
                 else:
                     raise ValueError("Unsupported file type")
-                redacted_conversation = redact_conversation(conversation, timestamps_by_id)
 
-                # Export results to output folder (as json file)
-                out_path = os.path.join(output_dir, f"{redacted_conversation['id']}.json")
-                with open(out_path, "w", encoding="utf-8") as outfile:
-                    json.dump(redacted_conversation, outfile, indent=4)
-                return out_path
+                return ", ".join(out_paths)
             except Exception as e:
                 last_exc = e
                 if attempt < MAX_FILE_RETRIES:
