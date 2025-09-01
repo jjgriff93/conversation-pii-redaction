@@ -3,6 +3,7 @@
 
 # Keep a single tracked example in input/
 !/input/sample_conversation.csv
+!/input/sample_conversation.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

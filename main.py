@@ -18,6 +18,15 @@ max_concurrent_requests = os.getenv("MAX_CONCURRENCY", "100")
 # CSV parsing configuration
 CSV_DELIMITER = os.getenv("CSV_DELIMITER", "|")  # set to "," to use comma-delimited CSVs
 
+# JSON parsing configuration
+# Dot-delimited path to the array that contains the conversation items, e.g. "phrases" or "payload.items"
+JSON_CONVERSATION_PATH = os.getenv("JSON_CONVERSATION_PATH")
+# Field names inside each conversation item
+JSON_PARTICIPANT_FIELD = os.getenv("JSON_PARTICIPANT_FIELD", "participant")
+JSON_TEXT_FIELD = os.getenv("JSON_TEXT_FIELD", "text")
+# Optional timestamp field inside each conversation item
+JSON_TIMESTAMP_FIELD = os.getenv("JSON_TIMESTAMP_FIELD")
+
 # Retry configuration (tunable via environment variables)
 MAX_HTTP_RETRIES = int(os.getenv("MAX_HTTP_RETRIES", "5"))
 HTTP_BACKOFF_FACTOR = float(os.getenv("HTTP_BACKOFF_FACTOR", "1.5"))
@@ -97,6 +106,106 @@ def load_conversation_from_csv(filename: str) -> tuple[dict, dict[str, str | Non
             })
             # Track original timestamp by item id for later merging into results
             timestamps_by_id[item_id] = timestamp or None  # None -> null in JSON
+
+    return conversation, timestamps_by_id
+
+def _get_by_path(obj: dict, path: str | None):
+    """Safely navigate a dot-delimited path in a dictionary. If path is None, return obj.
+    Supports integer indexes for list navigation when a path segment is a digit.
+    """
+    if path is None or path == "":
+        return obj
+    parts = [p for p in path.split(".") if p]
+    cur = obj
+    for part in parts:
+        if isinstance(cur, list):
+            # allow numeric index in path when navigating lists
+            if part.isdigit():
+                idx = int(part)
+                if 0 <= idx < len(cur):
+                    cur = cur[idx]
+                else:
+                    return None
+            else:
+                # cannot navigate non-numeric into list without custom selection
+                return None
+        elif isinstance(cur, dict):
+            if part in cur:
+                cur = cur[part]
+            else:
+                return None
+        else:
+            return None
+    return cur
+
+def load_conversation_from_json(filename: str) -> tuple[dict, dict[str, str | None]]:
+    """Load conversation from a JSON file and return
+    (conversation_payload, timestamps_by_id).
+
+    The JSON structure is configurable via environment variables:
+        - JSON_CONVERSATION_PATH: dot path to the array of items (e.g. "phrases"). If not set,
+          this function will attempt to detect an array at the root or common keys (phrases, messages, conversation).
+        - JSON_PARTICIPANT_FIELD: field name in each item for the participant (default: "participant").
+        - JSON_TEXT_FIELD: field name in each item for the text (default: "text").
+        - JSON_TIMESTAMP_FIELD: optional field name in each item for the timestamp.
+    """
+    with open(filename, 'r', encoding='utf-8-sig') as f:
+        data = json.load(f)
+
+    # Find the array that holds the conversation items
+    items = None
+    if isinstance(data, list):
+        items = data
+    else:
+        # Try configured path first
+        items = _get_by_path(data, JSON_CONVERSATION_PATH)
+        if items is None:
+            # Heuristics: try common keys
+            for key in ("phrases", "messages", "conversation", "items"):
+                v = data.get(key) if isinstance(data, dict) else None
+                if isinstance(v, list):
+                    items = v
+                    break
+
+    if not isinstance(items, list):
+        raise ValueError(
+            "Could not locate conversation array in JSON. Set JSON_CONVERSATION_PATH (e.g. 'phrases')."
+        )
+
+    conversation: dict = {
+        "id": os.path.splitext(os.path.basename(filename))[0],
+        "language": "en",
+        "modality": "text",
+        "conversationItems": [],
+    }
+
+    timestamps_by_id: dict[str, str | None] = {}
+
+    idx = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        participant = (str(item.get(JSON_PARTICIPANT_FIELD, "")).strip()
+                       if JSON_PARTICIPANT_FIELD else "")
+        text = (str(item.get(JSON_TEXT_FIELD, "")).strip()
+                if JSON_TEXT_FIELD else "")
+        timestamp_val = None
+        if JSON_TIMESTAMP_FIELD:
+            raw_ts = item.get(JSON_TIMESTAMP_FIELD)
+            if raw_ts is not None:
+                timestamp_val = str(raw_ts).strip() or None
+
+        if not (participant or text or timestamp_val):
+            continue
+
+        idx += 1
+        item_id = f"conversationId_{idx}"
+        conversation["conversationItems"].append({
+            "participantId": participant,
+            "id": item_id,
+            "text": text,
+        })
+        timestamps_by_id[item_id] = timestamp_val
 
     return conversation, timestamps_by_id
 
@@ -255,16 +364,16 @@ def main():
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
     
-    # Collect CSV files to process
-    csv_files = [f for f in os.listdir(input_dir) if f.lower().endswith(".csv")]
-    if not csv_files:
-        print("No CSV files found to process.")
+    # Collect CSV and JSON files to process
+    all_files = [f for f in os.listdir(input_dir) if f.lower().endswith((".csv", ".json"))]
+    if not all_files:
+        print("No CSV or JSON files found to process.")
         return
 
     # Filter out files that already have a corresponding JSON in output (idempotent reruns)
     pending_files: list[str] = []
     skipped = 0
-    for f in csv_files:
+    for f in all_files:
         base = os.path.splitext(f)[0]
         expected_out = os.path.join(output_dir, f"{base}.json")
         if os.path.exists(expected_out):
@@ -274,19 +383,18 @@ def main():
             pending_files.append(f)
 
     if not pending_files:
-        print(f"All {len(csv_files)} CSV files are already processed. Nothing to do.")
+        print(f"All {len(all_files)} files are already processed. Nothing to do.")
         return
 
     # Allow tuning concurrency via env var; default to a modest level to avoid service throttling
     max_workers = int(max_concurrent_requests)
-    max_workers = max(1, min(max_workers, len(csv_files)))
+    max_workers = max(1, min(max_workers, len(all_files)))
 
-    print(f"Processing {len(pending_files)} CSV file(s) with concurrency={max_workers}...")
+    print(f"Processing {len(pending_files)} file(s) with concurrency={max_workers}...")
 
-    def process_csv_file(filename: str) -> str:
-        """Process a single CSV file end-to-end and return the output path.
-        Includes retries for intermittent service errors.
-        """
+    def process_file(filename: str) -> str:
+        """Process a single CSV or JSON file end-to-end and return the output path.
+        Includes retries for intermittent service errors."""
         filepath = os.path.join(input_dir, filename)
         # Early skip guard if output already exists
         pre_base = os.path.splitext(filename)[0]
@@ -296,7 +404,12 @@ def main():
         last_exc: Exception | None = None
         for attempt in range(1, MAX_FILE_RETRIES + 1):
             try:
-                conversation, timestamps_by_id = load_conversation_from_csv(filepath)
+                if filename.lower().endswith('.csv'):
+                    conversation, timestamps_by_id = load_conversation_from_csv(filepath)
+                elif filename.lower().endswith('.json'):
+                    conversation, timestamps_by_id = load_conversation_from_json(filepath)
+                else:
+                    raise ValueError("Unsupported file type")
                 redacted_conversation = redact_conversation(conversation, timestamps_by_id)
 
                 # Export results to output folder (as json file)
@@ -320,7 +433,7 @@ def main():
     successes = 0
     failures = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(process_csv_file, f): f for f in pending_files}
+        future_map = {executor.submit(process_file, f): f for f in pending_files}
         for future in as_completed(future_map):
             fname = future_map[future]
             try:

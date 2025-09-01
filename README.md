@@ -69,7 +69,7 @@ This project provides a simple script to redact personally identifiable informat
 
 ## Usage
 
-Place your conversation CSV files in the `input` directory. The script will process each file and output the redacted JSON files to the `output` directory.
+Place your conversation CSV or JSON files in the `input` directory. The script will process each file and output the redacted JSON files to the `output` directory.
 
 ```bash
 uv run main.py
@@ -95,6 +95,37 @@ By default, the script expects pipe-delimited (`|`) CSVs. To use comma-delimited
    ```
 
 Quoted fields with commas are handled correctly by the CSV parser when the delimiter is set to `,`.
+
+### Using JSON files
+
+You can also provide conversations in JSON format. Configure where the conversation items live and which fields to read using environment variables:
+
+- JSON_CONVERSATION_PATH: dot path to the array containing items (e.g. `phrases`, `payload.items`). If omitted, the script will try common keys like `phrases`, `messages`, `conversation`, `items` or a top-level array.
+- JSON_PARTICIPANT_FIELD: field name for the participant inside each item (default: `participant`).
+- JSON_TEXT_FIELD: field name for the text inside each item (default: `text`).
+- JSON_TIMESTAMP_FIELD: optional field name for a timestamp inside each item (optional; if not provided, output timestamps will be `null`).
+
+Example for a file like `dummy.json` that contains an array of phrases with shape `{ participantPurpose: string, text: string }`:
+
+- macOS/Linux
+
+```bash
+export JSON_CONVERSATION_PATH=phrases
+export JSON_PARTICIPANT_FIELD=participantPurpose
+export JSON_TEXT_FIELD=text
+uv run main.py
+```
+
+- Windows (PowerShell)
+
+```powershell
+$env:JSON_CONVERSATION_PATH="phrases"
+$env:JSON_PARTICIPANT_FIELD="participantPurpose"
+$env:JSON_TEXT_FIELD="text"
+uv run main.py
+```
+
+Place `dummy.json` in the `input/` folder. The tool will produce `output/dummy.json` with redacted content.
 
 ### Retry and resilience
 

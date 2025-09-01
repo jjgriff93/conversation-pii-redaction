@@ -1,0 +1,20 @@
+{
+  "conversation": [
+    {
+      "participant": "internal",
+      "text": "Good morning."
+    },
+    {
+      "participant": "external",
+      "text": "Hi, I'm Jane Doe."
+    },
+    {
+      "participant": "internal",
+      "text": "Can I take your email address?"
+    },
+    {
+      "participant": "external",
+      "text": "jane.doe@example.com"
+    }
+  ]
+}
