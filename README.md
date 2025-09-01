@@ -50,6 +50,9 @@ This project provides a simple script to redact personally identifiable informat
       export MAX_FILE_RETRIES="3"
       # CSV delimiter: defaults to '|'; set to ',' for comma-delimited files
       export CSV_DELIMITER="|"
+   # JSON metadata carryover: comma-separated list of top-level fields from input JSON to copy into output metadata
+   # e.g. conversationId,tag
+   export JSON_METADATA_FIELDS=""
    ```
 
     - Windows (PowerShell)
@@ -105,44 +108,56 @@ You can also provide conversations in JSON format. Configure where the conversat
 - JSON_TEXT_FIELD: field name for the text inside each item (default: `text`).
 - JSON_TIMESTAMP_FIELD: optional field name for a timestamp inside each item (optional; if not provided, output timestamps will be `null`).
 - JSON_MULTI_DOC: when `true`, and the top-level JSON is an array, treat each element as a separate document (conversation). Outputs will be suffixed with `_001`, `_002`, etc.
-
-Example for a file like `dummy.json` that contains an array of phrases with shape `{ participantPurpose: string, text: string }`:
-
-- macOS/Linux
-
-```bash
-export JSON_CONVERSATION_PATH=phrases
-export JSON_PARTICIPANT_FIELD=participantPurpose
-export JSON_TEXT_FIELD=text
-uv run main.py
-```
-
-- Windows (PowerShell)
-
-```powershell
-$env:JSON_CONVERSATION_PATH="phrases"
-$env:JSON_PARTICIPANT_FIELD="participantPurpose"
-$env:JSON_TEXT_FIELD="text"
-uv run main.py
-```
-
-Place `dummy.json` in the `input/` folder. The tool will produce `output/dummy.json` with redacted content.
+- JSON_METADATA_FIELDS: comma-separated list of top-level fields from each input JSON document to copy into the output object's `metadata` property. Example: `conversationId,tag`.
 
 #### Multi-document JSON example
 
-If your input JSON is a top-level array where each element is a separate document containing `phrases`, enable multi-document mode:
+If your input JSON is a top-level array where each element is a separate document containing `conversation`, enable multi-document mode:
 
 - macOS/Linux
 
 ```bash
 export JSON_MULTI_DOC=true
-export JSON_CONVERSATION_PATH=phrases
-export JSON_PARTICIPANT_FIELD=participantPurpose
+export JSON_CONVERSATION_PATH=conversation
+export JSON_PARTICIPANT_FIELD=speaker
 export JSON_TEXT_FIELD=text
 uv run main.py
 ```
 
-Given an input file `input/sessions.json` like `[{"phrases":[...]},{"phrases":[...]}]`, this will emit `output/sessions_001.json`, `output/sessions_002.json`, etc.
+Given an input file `input/sessions.json` like `[{"conversation":[...]},{"conversation":[...]}]`, this will emit `output/sessions_001.json`, `output/sessions_002.json`, etc.
+
+### Metadata carryover from input JSON
+
+If you set `JSON_METADATA_FIELDS`, the specified top-level fields from each input JSON document are copied into the output's `metadata` object. For example, with:
+
+```bash
+export JSON_METADATA_FIELDS=conversationId,communicationId,externalTag
+```
+
+An input element like:
+
+```json
+{
+   "conversationId": "abc-123",
+   "tag": "xyz",
+   "conversation": [ ... ]
+}
+```
+
+Will produce an output with:
+
+```json
+{
+   "id": "<derived id>",
+   "metadata": {
+      "conversationId": "abc-123",
+      "tag": "xyz"
+   },
+   "conversation": [ ... ]
+}
+```
+
+For CSV inputs, no metadata is currently extracted; `metadata` will remain empty unless you extend the script to parse a separate CSV metadata source.
 
 ### Retry and resilience
 

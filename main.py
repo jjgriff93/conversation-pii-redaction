@@ -19,14 +19,18 @@ max_concurrent_requests = os.getenv("MAX_CONCURRENCY", "100")
 CSV_DELIMITER = os.getenv("CSV_DELIMITER", "|")  # set to "," to use comma-delimited CSVs
 
 # JSON parsing configuration
-# Dot-delimited path to the array that contains the conversation items, e.g. "phrases" or "payload.items"
-JSON_CONVERSATION_PATH = os.getenv("JSON_CONVERSATION_PATH")
+# Dot-delimited path to the array that contains the conversation items, e.g. "conversation" or "history.items"
+JSON_CONVERSATION_PATH = os.getenv("JSON_CONVERSATION_PATH", "conversation")
 # Field names inside each conversation item
 JSON_PARTICIPANT_FIELD = os.getenv("JSON_PARTICIPANT_FIELD", "participant")
 JSON_TEXT_FIELD = os.getenv("JSON_TEXT_FIELD", "text")
 # Optional timestamp field inside each conversation item
 JSON_TIMESTAMP_FIELD = os.getenv("JSON_TIMESTAMP_FIELD")
 JSON_MULTI_DOC = os.getenv("JSON_MULTI_DOC", "false").strip().lower() in {"1", "true", "yes"}
+# Comma-separated list of top-level fields to carry over from each input JSON document into the output "metadata" object
+JSON_METADATA_FIELDS: list[str] = [
+    p.strip() for p in os.getenv("JSON_METADATA_FIELDS", "").split(",") if p.strip()
+]
 
 # Retry configuration (tunable via environment variables)
 MAX_HTTP_RETRIES = int(os.getenv("MAX_HTTP_RETRIES", "5"))
@@ -86,7 +90,7 @@ def load_conversation_from_csv(filename: str) -> tuple[dict, dict[str, str | Non
 
         # Build conversation items
         idx = 0
-        for row in reader:
+    for row in reader:
             # Defensive: handle missing or empty rows
             if not row:
                 continue
@@ -94,8 +98,12 @@ def load_conversation_from_csv(filename: str) -> tuple[dict, dict[str, str | Non
             participant = (row.get('Participant') or '').strip()
             text = (row.get('Transcript') or '').strip()
 
-            # Skip rows that don't have any meaningful content
+            # Skip rows without any content
             if not (timestamp or participant or text):
+                continue
+
+            # Ensure the service receives only items with non-empty text
+            if not text:
                 continue
 
             idx += 1
@@ -139,8 +147,11 @@ def _get_by_path(obj: dict | list, path: str | None):
             return None
     return cur
 
-def _build_conversation_from_doc(doc: dict | list, conv_id: str) -> tuple[dict, dict[str, str | None]]:
-    """Build a conversation payload from a single JSON document (dict or list)."""
+def _build_conversation_from_doc(doc: dict | list, conv_id: str) -> tuple[dict, dict[str, str | None], dict]:
+    """Build a conversation payload and extracted metadata from a single JSON document (dict or list).
+
+    Returns a tuple of (conversation_payload, timestamps_by_id, metadata_from_doc).
+    """
     # Find the array that holds the conversation items
     items = None
     if isinstance(doc, list):
@@ -165,14 +176,27 @@ def _build_conversation_from_doc(doc: dict | list, conv_id: str) -> tuple[dict, 
     }
 
     timestamps_by_id: dict[str, str | None] = {}
+    # Extract configured top-level fields from the source document as metadata
+    metadata_from_doc: dict = {}
+    if isinstance(doc, dict) and JSON_METADATA_FIELDS:
+        for field in JSON_METADATA_FIELDS:
+            if field in doc:
+                metadata_from_doc[field] = doc[field]
     idx = 0
     for item in items:
         if not isinstance(item, dict):
             continue
-        participant = (str(item.get(JSON_PARTICIPANT_FIELD, "")).strip()
-                       if JSON_PARTICIPANT_FIELD else "")
-        text = (str(item.get(JSON_TEXT_FIELD, "")).strip()
-                if JSON_TEXT_FIELD else "")
+        # participant can be empty; normalize to string if provided
+        raw_participant = item.get(JSON_PARTICIPANT_FIELD) if JSON_PARTICIPANT_FIELD else ""
+        participant = (str(raw_participant).strip() if raw_participant is not None else "")
+
+        # text must be a non-empty string
+        raw_text = item.get(JSON_TEXT_FIELD) if JSON_TEXT_FIELD else None
+        text = raw_text if isinstance(raw_text, str) else ""
+        text = text.strip()
+        if not text:
+            # skip items without valid text to avoid API errors
+            continue
         timestamp_val = None
         if JSON_TIMESTAMP_FIELD:
             raw_ts = item.get(JSON_TIMESTAMP_FIELD)
@@ -191,9 +215,9 @@ def _build_conversation_from_doc(doc: dict | list, conv_id: str) -> tuple[dict, 
         })
         timestamps_by_id[item_id] = timestamp_val
 
-    return conversation, timestamps_by_id
+    return conversation, timestamps_by_id, metadata_from_doc
 
-def load_conversations_from_json(filename: str) -> list[tuple[dict, dict[str, str | None]]]:
+def load_conversations_from_json(filename: str) -> list[tuple[dict, dict[str, str | None], dict]]:
     """Load one or more conversations from a JSON file.
 
     Behavior:
@@ -206,22 +230,22 @@ def load_conversations_from_json(filename: str) -> list[tuple[dict, dict[str, st
 
     base_id = os.path.splitext(os.path.basename(filename))[0]
 
-    conversations: list[tuple[dict, dict[str, str | None]]] = []
+    conversations: list[tuple[dict, dict[str, str | None], dict]] = []
     if JSON_MULTI_DOC and isinstance(data, list):
         for i, doc in enumerate(data, start=1):
             if not isinstance(doc, (dict, list)):
                 continue
             conv_id = f"{base_id}_{i:03d}"
-            conversation, timestamps_by_id = _build_conversation_from_doc(doc, conv_id)
-            conversations.append((conversation, timestamps_by_id))
+            conversation, timestamps_by_id, metadata = _build_conversation_from_doc(doc, conv_id)
+            conversations.append((conversation, timestamps_by_id, metadata))
     else:
         # Single document mode
-        conversation, timestamps_by_id = _build_conversation_from_doc(data, base_id)
-        conversations.append((conversation, timestamps_by_id))
+        conversation, timestamps_by_id, metadata = _build_conversation_from_doc(data, base_id)
+        conversations.append((conversation, timestamps_by_id, metadata))
 
     return conversations
 
-def redact_conversation(conversation: dict, timestamps_by_id: dict[str, str | None]) -> dict:
+def redact_conversation(conversation: dict, timestamps_by_id: dict[str, str | None], metadata: dict | None = None) -> dict:
     analyze_endpoint = f"{endpoint}language/analyze-conversations/jobs?api-version={api_version}"
 
     request_headers = {
@@ -348,7 +372,28 @@ def redact_conversation(conversation: dict, timestamps_by_id: dict[str, str | No
         time.sleep(poll_interval)
         poll_interval = min(poll_interval * HTTP_BACKOFF_FACTOR, MAX_POLL_INTERVAL_SECONDS)
 
-    analysed_conversation = task_result["tasks"]["items"][0]["results"]["conversations"][0]
+    # Safely extract the first conversation result
+    try:
+        items = task_result.get("tasks", {}).get("items", [])
+        if not items:
+            raise IndexError("No task items in response")
+        convs = items[0].get("results", {}).get("conversations", [])
+        if not convs:
+            # If there are per-item errors, surface the first one for clarity
+            result_errors = items[0].get("results", {}).get("errors", [])
+            if result_errors:
+                err = result_errors[0]
+                eid = err.get("id")
+                emsg = err.get("error", {}).get("message")
+                einner = err.get("error", {}).get("innererror", {})
+                inner_code = einner.get("code")
+                inner_msg = einner.get("message")
+                raise RuntimeError(f"Analyze error for id '{eid}': {emsg} ({inner_code}: {inner_msg})")
+            raise IndexError("No conversations array in results")
+        analysed_conversation = convs[0]
+    except Exception as e:
+        preview = json.dumps(task_result, indent=2)[:1000]
+        raise RuntimeError(f"Unexpected analyze response shape: {e}. Body preview: {preview}")
 
     # Create a mapping of conversation item IDs to participant IDs from the original conversation
     id_to_participant = {item["id"]: item["participantId"] for item in conversation["conversationItems"]}
@@ -358,9 +403,7 @@ def redact_conversation(conversation: dict, timestamps_by_id: dict[str, str | No
     # and the new "redactedContent" from the analysis results as the "text" field
     redacted_conversation = {
         "id": analysed_conversation["id"],
-        "metadata": {
-            # Add any custom metadata to include here
-        },
+        "metadata": metadata or {},
         "conversation": [
             {
                 "timestamp": timestamps_by_id.get(item["id"]),
@@ -417,21 +460,38 @@ def main():
         for attempt in range(1, MAX_FILE_RETRIES + 1):
             try:
                 out_paths: list[str] = []
+                def _write_empty(conv_id: str, metadata: dict | None = None) -> str:
+                    out_path = os.path.join(output_dir, f"{conv_id}.json")
+                    payload = {
+                        "id": conv_id,
+                        "metadata": {"note": "No conversation items found; nothing to redact."} | (metadata or {}),
+                        "conversation": [],
+                    }
+                    with open(out_path, "w", encoding="utf-8") as outfile:
+                        json.dump(payload, outfile, indent=4)
+                    return out_path
+
                 if filename.lower().endswith('.csv'):
                     conversation, timestamps_by_id = load_conversation_from_csv(filepath)
-                    redacted_conversation = redact_conversation(conversation, timestamps_by_id)
-                    out_path = os.path.join(output_dir, f"{redacted_conversation['id']}.json")
-                    with open(out_path, "w", encoding="utf-8") as outfile:
-                        json.dump(redacted_conversation, outfile, indent=4)
-                    out_paths.append(out_path)
-                elif filename.lower().endswith('.json'):
-                    convo_list = load_conversations_from_json(filepath)
-                    for conversation, timestamps_by_id in convo_list:
-                        redacted_conversation = redact_conversation(conversation, timestamps_by_id)
+                    if not conversation.get("conversationItems"):
+                        out_paths.append(_write_empty(conversation.get("id", os.path.splitext(filename)[0]), {}))
+                    else:
+                        redacted_conversation = redact_conversation(conversation, timestamps_by_id, {})
                         out_path = os.path.join(output_dir, f"{redacted_conversation['id']}.json")
                         with open(out_path, "w", encoding="utf-8") as outfile:
                             json.dump(redacted_conversation, outfile, indent=4)
                         out_paths.append(out_path)
+                elif filename.lower().endswith('.json'):
+                    convo_list = load_conversations_from_json(filepath)
+                    for conversation, timestamps_by_id, metadata in convo_list:
+                        if not conversation.get("conversationItems"):
+                            out_paths.append(_write_empty(conversation.get("id", os.path.splitext(filename)[0]), metadata))
+                        else:
+                            redacted_conversation = redact_conversation(conversation, timestamps_by_id, metadata)
+                            out_path = os.path.join(output_dir, f"{redacted_conversation['id']}.json")
+                            with open(out_path, "w", encoding="utf-8") as outfile:
+                                json.dump(redacted_conversation, outfile, indent=4)
+                            out_paths.append(out_path)
                 else:
                     raise ValueError("Unsupported file type")
 
